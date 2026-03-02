@@ -12,6 +12,20 @@ import { Upload, Film, Image as ImageIcon } from "lucide-react";
 import Composer from "@/components/ui/Composer";
 import VideoPlayer from "@/components/ui/VideoPlayer";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  generateImageWithGemini,
+  editImageWithGemini,
+  fileToBase64 as geminiFileToBase64,
+  parseDataUrl as geminiParseDataUrl,
+} from "@/lib/gemini-client";
+import { generateImageWithImagen } from "@/lib/imagen-client";
+import {
+  generateVideoWithVeo,
+  getVideoOperation,
+  downloadVideoByUri,
+  fileToBase64 as veoFileToBase64,
+  parseDataUrl as veoParseDataUrl,
+} from "@/lib/veo-client";
 
 type VeoOperationName = string | null;
 
@@ -35,13 +49,13 @@ const VeoStudio: React.FC = () => {
     if (mode === "create-video") {
       setSelectedModel("veo-3.0-generate-001");
     } else if (mode === "edit-image" || mode === "compose-image") {
-      setSelectedModel("gemini-2.5-flash-image-preview");
+      setSelectedModel("gemini-2.5-flash-image");
     } else if (mode === "create-image") {
       if (
         !selectedModel.includes("gemini") &&
         !selectedModel.includes("imagen")
       ) {
-        setSelectedModel("gemini-2.5-flash-image-preview");
+        setSelectedModel("gemini-2.5-flash-image");
       }
     }
   }, [mode, selectedModel]);
@@ -230,27 +244,9 @@ const VeoStudio: React.FC = () => {
     setImagenBusy(true);
     setGeneratedImage(null);
     try {
-      const resp = await fetch("/api/imagen/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: imagePrompt }),
-      });
-
-      if (!resp.ok) {
-        console.error("Imagen API error:", resp.status, resp.statusText);
-        throw new Error(`API error: ${resp.status}`);
-      }
-
-      const json = await resp.json();
-      console.log("Imagen API response:", json);
-
-      if (json?.image?.imageBytes) {
-        const dataUrl = `data:${json.image.mimeType};base64,${json.image.imageBytes}`;
-        setGeneratedImage(dataUrl);
-      } else if (json?.error) {
-        console.error("Imagen API returned error:", json.error);
-        throw new Error(json.error);
-      }
+      const result = await generateImageWithImagen(imagePrompt);
+      const dataUrl = `data:${result.mimeType};base64,${result.imageBytes}`;
+      setGeneratedImage(dataUrl);
     } catch (e) {
       console.error("Error in generateWithImagen:", e);
       alert(`Failed to generate image: ${e.message}`);
@@ -266,30 +262,11 @@ const VeoStudio: React.FC = () => {
     setGeminiBusy(true);
     setGeneratedImage(null);
     try {
-      const resp = await fetch("/api/gemini/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: imagePrompt }),
-      });
-
-      if (!resp.ok) {
-        console.error("Gemini API error:", resp.status, resp.statusText);
-        throw new Error(`API error: ${resp.status}`);
-      }
-
-      const json = await resp.json();
-      console.log("Gemini API response:", json);
-
-      if (json?.image?.imageBytes) {
-        const dataUrl = `data:${json.image.mimeType};base64,${json.image.imageBytes}`;
-        setGeneratedImage(dataUrl);
-      } else if (json?.error) {
-        console.error("Gemini API returned error:", json.error);
-        throw new Error(json.error);
-      }
+      const result = await generateImageWithGemini(imagePrompt);
+      const dataUrl = `data:${result.mimeType};base64,${result.imageBytes}`;
+      setGeneratedImage(dataUrl);
     } catch (e) {
       console.error("Error in generateWithGemini:", e);
-      // Show user-friendly error message
       alert(`Failed to generate image: ${e.message}`);
     } finally {
       console.log("Resetting Gemini busy state");
@@ -303,38 +280,19 @@ const VeoStudio: React.FC = () => {
     setGeminiBusy(true);
     setGeneratedImage(null);
     try {
-      const form = new FormData();
-      form.append("prompt", editPrompt);
+      const images: Array<{ data: string; mimeType: string }> = [];
 
       if (imageFile) {
-        form.append("imageFile", imageFile);
+        const imageData = await geminiFileToBase64(imageFile);
+        images.push(imageData);
       } else if (generatedImage) {
-        const [meta, b64] = generatedImage.split(",");
-        const mime = meta?.split(";")?.[0]?.replace("data:", "") || "image/png";
-        form.append("imageBase64", b64);
-        form.append("imageMimeType", mime);
+        const imageData = geminiParseDataUrl(generatedImage);
+        images.push(imageData);
       }
 
-      const resp = await fetch("/api/gemini/edit", {
-        method: "POST",
-        body: form,
-      });
-
-      if (!resp.ok) {
-        console.error("Gemini edit API error:", resp.status, resp.statusText);
-        throw new Error(`API error: ${resp.status}`);
-      }
-
-      const json = await resp.json();
-      console.log("Gemini edit API response:", json);
-
-      if (json?.image?.imageBytes) {
-        const dataUrl = `data:${json.image.mimeType};base64,${json.image.imageBytes}`;
-        setGeneratedImage(dataUrl);
-      } else if (json?.error) {
-        console.error("Gemini edit API returned error:", json.error);
-        throw new Error(json.error);
-      }
+      const result = await editImageWithGemini(editPrompt, images);
+      const dataUrl = `data:${result.mimeType};base64,${result.imageBytes}`;
+      setGeneratedImage(dataUrl);
     } catch (e) {
       console.error("Error in editWithGemini:", e);
       alert(`Failed to edit image: ${e.message}`);
@@ -349,60 +307,26 @@ const VeoStudio: React.FC = () => {
     setGeminiBusy(true);
     setGeneratedImage(null);
     try {
-      const form = new FormData();
-      form.append("prompt", composePrompt);
+      const images: Array<{ data: string; mimeType: string }> = [];
 
       // Add newly uploaded images first
       for (const file of multipleImageFiles) {
-        form.append("imageFiles", file);
+        const imageData = await geminiFileToBase64(file);
+        images.push(imageData);
       }
 
       // Include existing image last (if any)
       if (imageFile) {
-        form.append("imageFiles", imageFile);
+        const imageData = await geminiFileToBase64(imageFile);
+        images.push(imageData);
       } else if (generatedImage) {
-        // Convert base64 to blob and add as file
-        const [meta, b64] = generatedImage.split(",");
-        const mime = meta?.split(";")?.[0]?.replace("data:", "") || "image/png";
-        const byteCharacters = atob(b64);
-        const byteNumbers = new Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-          byteNumbers[i] = byteCharacters.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
-        const blob = new Blob([byteArray], { type: mime });
-
-        // Create a File object from the blob
-        const existingImageFile = new File([blob], "existing-image.png", {
-          type: mime,
-        });
-        form.append("imageFiles", existingImageFile);
+        const imageData = geminiParseDataUrl(generatedImage);
+        images.push(imageData);
       }
 
-      const resp = await fetch("/api/gemini/edit", {
-        method: "POST",
-        body: form,
-      });
-
-      if (!resp.ok) {
-        console.error(
-          "Gemini compose API error:",
-          resp.status,
-          resp.statusText
-        );
-        throw new Error(`API error: ${resp.status}`);
-      }
-
-      const json = await resp.json();
-      console.log("Gemini compose API response:", json);
-
-      if (json?.image?.imageBytes) {
-        const dataUrl = `data:${json.image.mimeType};base64,${json.image.imageBytes}`;
-        setGeneratedImage(dataUrl);
-      } else if (json?.error) {
-        console.error("Gemini compose API returned error:", json.error);
-        throw new Error(json.error);
-      }
+      const result = await editImageWithGemini(composePrompt, images);
+      const dataUrl = `data:${result.mimeType};base64,${result.imageBytes}`;
+      setGeneratedImage(dataUrl);
     } catch (e) {
       console.error("Error in composeWithGemini:", e);
       alert(`Failed to compose images: ${e.message}`);
@@ -420,31 +344,26 @@ const VeoStudio: React.FC = () => {
       setIsGenerating(true);
       setVideoUrl(null);
 
-      const form = new FormData();
-      form.append("prompt", prompt);
-      form.append("model", selectedModel);
-      if (negativePrompt) form.append("negativePrompt", negativePrompt);
-      if (aspectRatio) form.append("aspectRatio", aspectRatio);
-
-      if (imageFile || generatedImage) {
-        if (imageFile) {
-          form.append("imageFile", imageFile);
-        } else if (generatedImage) {
-          const [meta, b64] = generatedImage.split(",");
-          const mime =
-            meta?.split(";")?.[0]?.replace("data:", "") || "image/png";
-          form.append("imageBase64", b64);
-          form.append("imageMimeType", mime);
-        }
-      }
-
       try {
-        const resp = await fetch("/api/veo/generate", {
-          method: "POST",
-          body: form,
+        let image: { imageBytes: string; mimeType: string } | undefined;
+
+        if (imageFile) {
+          const imageData = await veoFileToBase64(imageFile);
+          image = imageData;
+        } else if (generatedImage) {
+          const imageData = veoParseDataUrl(generatedImage);
+          image = imageData;
+        }
+
+        const operationName = await generateVideoWithVeo({
+          prompt,
+          model: selectedModel,
+          negativePrompt: negativePrompt || undefined,
+          aspectRatio: aspectRatio || undefined,
+          image,
         });
-        const json = await resp.json();
-        setOperationName(json?.name || null);
+
+        setOperationName(operationName);
       } catch (e) {
         console.error(e);
         setIsGenerating(false);
@@ -482,21 +401,11 @@ const VeoStudio: React.FC = () => {
     async function poll() {
       if (!operationName || videoUrl) return;
       try {
-        const resp = await fetch("/api/veo/operation", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: operationName }),
-        });
-        const fresh = await resp.json();
+        const fresh = await getVideoOperation(operationName);
         if (fresh?.done) {
           const fileUri = fresh?.response?.generatedVideos?.[0]?.video?.uri;
           if (fileUri) {
-            const dl = await fetch("/api/veo/download", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ uri: fileUri }),
-            });
-            const blob = await dl.blob();
+            const blob = await downloadVideoByUri(fileUri);
             videoBlobRef.current = blob;
             const url = URL.createObjectURL(blob);
             setVideoUrl(url);
